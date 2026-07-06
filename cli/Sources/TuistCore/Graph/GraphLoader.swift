@@ -184,7 +184,7 @@ public struct GraphLoader: GraphLoading {
                 )
             }
 
-        case let .package(product, type, _):
+        case let .package(product, type, _, _):
             switch type {
             case .macro:
                 return try loadPackage(fromPath: path, productName: product, type: .macro)
