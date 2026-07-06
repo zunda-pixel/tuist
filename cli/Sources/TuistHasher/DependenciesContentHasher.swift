@@ -162,10 +162,10 @@ public struct DependenciesContentHasher: DependenciesContentHashing {
                     hash: try contentHasher.hash("library-\(libraryHash)-\(publicHeadersHash)")
                 )
             }
-        case let .package(product, type, _):
+        case let .package(product, type, package, _):
             return DependenciesContentHash(
                 hashedPaths: hashedPaths,
-                hash: try contentHasher.hash("package-\(product)-\(type.rawValue)")
+                hash: try contentHasher.hash("package-\(product)-\(type.rawValue)-\(package ?? "")")
             )
         case let .sdk(name, status, _):
             return DependenciesContentHash(

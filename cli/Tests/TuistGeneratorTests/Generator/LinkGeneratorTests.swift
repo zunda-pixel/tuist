@@ -445,6 +445,100 @@ final class LinkGeneratorTests: XCTestCase {
         XCTAssertEqual(try pbxTarget.frameworksBuildPhase()?.files?.map(\.product?.productName), ["OrderedCollections"])
     }
 
+    func test_generatePackages_whenPluginProduct_addsTargetDependencyWithResolvedPackageReference() throws {
+        // Given
+        let target = Target.test(
+            name: "Test",
+            product: .framework,
+            dependencies: [
+                .package(product: "SwiftLint", type: .plugin),
+            ]
+        )
+        let pbxproj = PBXProj()
+        let pbxTarget = PBXNativeTarget(name: target.name)
+        pbxproj.add(object: pbxTarget)
+
+        let frameworksBuildPhase = PBXFrameworksBuildPhase()
+        pbxproj.add(object: frameworksBuildPhase)
+        pbxTarget.buildPhases.append(frameworksBuildPhase)
+
+        let packageReference = XCRemoteSwiftPackageReference(
+            repositoryURL: "https://github.com/lukepistrol/SwiftLintPlugin"
+        )
+        pbxproj.add(object: packageReference)
+        let pbxProject = createPbxProject(pbxproj: pbxproj)
+        pbxProject.remotePackages = [packageReference]
+        pbxproj.rootObject = pbxProject
+
+        // When
+        try subject.generatePackages(
+            target: target,
+            pbxTarget: pbxTarget,
+            pbxproj: pbxproj
+        )
+
+        // Then: the plugin is wired as a target dependency, not a linked framework, and it resolves
+        // to the single declared remote package so Xcode runs the build-tool plugin.
+        XCTAssertEqual(pbxTarget.dependencies.map(\.product?.productName), ["SwiftLint"])
+        XCTAssertEqual(pbxTarget.dependencies.first?.product?.package, packageReference)
+        XCTAssertNil(pbxTarget.packageProductDependencies?.first)
+        XCTAssertEqual(try pbxTarget.frameworksBuildPhase()?.files?.count, 0)
+    }
+
+    func test_generatePackages_whenPluginProductNamesItsPackage_resolvesThatPackage() throws {
+        // Given
+        let target = Target.test(
+            name: "Test",
+            product: .framework,
+            dependencies: [
+                .package(product: "SwiftLint", type: .plugin, package: "SwiftLintPlugin"),
+            ]
+        )
+        let pbxproj = PBXProj()
+        let pbxTarget = PBXNativeTarget(name: target.name)
+        pbxproj.add(object: pbxTarget)
+
+        let frameworksBuildPhase = PBXFrameworksBuildPhase()
+        pbxproj.add(object: frameworksBuildPhase)
+        pbxTarget.buildPhases.append(frameworksBuildPhase)
+
+        let otherPackage = XCRemoteSwiftPackageReference(repositoryURL: "https://github.com/apple/swift-argument-parser")
+        let pluginPackage = XCRemoteSwiftPackageReference(repositoryURL: "https://github.com/lukepistrol/SwiftLintPlugin")
+        pbxproj.add(object: otherPackage)
+        pbxproj.add(object: pluginPackage)
+        let pbxProject = createPbxProject(pbxproj: pbxproj)
+        pbxProject.remotePackages = [otherPackage, pluginPackage]
+        pbxproj.rootObject = pbxProject
+
+        // When
+        try subject.generatePackages(
+            target: target,
+            pbxTarget: pbxTarget,
+            pbxproj: pbxproj
+        )
+
+        // Then: with multiple packages declared, the named package (matched by its Xcode name derived
+        // from the repository URL) is the one that gets attached.
+        XCTAssertEqual(pbxTarget.dependencies.first?.product?.package, pluginPackage)
+    }
+
+    private func createPbxProject(pbxproj: PBXProj) -> PBXProject {
+        let configList = XCConfigurationList(buildConfigurations: [])
+        pbxproj.add(object: configList)
+        let mainGroup = PBXGroup()
+        pbxproj.add(object: mainGroup)
+        let pbxProject = PBXProject(
+            name: "Project",
+            buildConfigurationList: configList,
+            compatibilityVersion: "0",
+            preferredProjectObjectVersion: nil,
+            minimizedProjectReferenceProxies: nil,
+            mainGroup: mainGroup
+        )
+        pbxproj.add(object: pbxProject)
+        return pbxProject
+    }
+
     func test_generateEmbedPhase_setupEmbedFrameworksBuildPhase_whenPackageProductIsPresent() throws {
         // Given
         var dependencies: Set<GraphDependencyReference> = []
