@@ -86,7 +86,7 @@ extension TargetDependency {
 
         // MARK: - Package & SDK
 
-        case let .package(product, type, _):
+        case let .package(product, type, _, _):
             return .packageProduct(
                 path: sourceDirectory,
                 product: product,

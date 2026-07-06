@@ -19,7 +19,7 @@ extension GraphTraversing {
             let products = project.targets.values
                 .flatMap(\.dependencies)
                 .compactMap { dependency -> String? in
-                    guard case let .package(product, _, _) = dependency else { return nil }
+                    guard case let .package(product, _, _, _) = dependency else { return nil }
                     return product
                 }
             for path in localPackagePaths {

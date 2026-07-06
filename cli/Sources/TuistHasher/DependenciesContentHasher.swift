@@ -162,17 +162,20 @@ public struct DependenciesContentHasher: DependenciesContentHashing {
                     hash: try contentHasher.hash("library-\(libraryHash)-\(publicHeadersHash)")
                 )
             }
-        case let .package(product, type, _):
+        case let .package(product, type, package, _):
             let packageTraits = packageTraitsFingerprint(graphTarget.project.packageTraits)
             guard let packageTraits else {
                 return DependenciesContentHash(
                     hashedPaths: hashedPaths,
-                    hash: try contentHasher.hash("package-\(product)-\(type.rawValue)")
+                    hash: try contentHasher.hash(
+                        ["package", product, type.rawValue, package].compactMap { $0 }.joined(separator: "-")
+                    )
                 )
             }
             let fingerprint = PackageDependencyFingerprint(
                 product: product,
                 type: type.rawValue,
+                package: package,
                 packageTraits: packageTraits
             )
             let encoder = JSONEncoder()
@@ -204,6 +207,7 @@ public struct DependenciesContentHasher: DependenciesContentHashing {
     private struct PackageDependencyFingerprint: Codable {
         let product: String
         let type: String
+        let package: String?
         let packageTraits: [PackageTraitsFingerprint]
     }
 

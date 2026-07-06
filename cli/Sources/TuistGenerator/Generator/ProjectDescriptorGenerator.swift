@@ -138,6 +138,15 @@ struct ProjectDescriptorGenerator: ProjectDescriptorGenerating {
             pbxproj: pbxproj
         )
 
+        // Swift package references must exist before targets are generated so that target linking can
+        // attach a product dependency's `package` reference (Xcode needs this to run plugin products).
+        Logger.current.debug("Generating Swift package references for project \(project.name)")
+        try generateSwiftPackageReferences(
+            project: project,
+            pbxproj: pbxproj,
+            pbxProject: pbxProject
+        )
+
         Logger.current.debug("Generating targets for project \(project.name)")
         let (nativeTargets, targetSideEffects) = try await generateTargets(
             project: project,
@@ -149,13 +158,6 @@ struct ProjectDescriptorGenerator: ProjectDescriptorGenerating {
 
         Logger.current.debug("Generating test target identity for project \(project.name)")
         generateTestTargetIdentity(
-            project: project,
-            pbxproj: pbxproj,
-            pbxProject: pbxProject
-        )
-
-        Logger.current.debug("Generating Swift package references for project \(project.name)")
-        try generateSwiftPackageReferences(
             project: project,
             pbxproj: pbxproj,
             pbxProject: pbxProject

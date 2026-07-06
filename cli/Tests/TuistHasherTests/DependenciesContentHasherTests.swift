@@ -242,6 +242,21 @@ final class DependenciesContentHasherTests: TuistUnitTestCase {
             .called(2)
     }
 
+    func test_hash_whenDependencyIsPackageWithOwningPackage_callsContentHasherAsExpected() async throws {
+        // Given
+        let dependency = TargetDependency.package(product: "foo", type: .plugin, package: "FooPlugin")
+
+        // When
+        let graphTarget = GraphTarget.test(target: Target.test(dependencies: [dependency]))
+        let hash = try await subject.hash(graphTarget: graphTarget, hashedTargets: hashedTargets, hashedPaths: hashedPaths).hash
+
+        // Then
+        XCTAssertEqual(hash, "package-foo-plugin-FooPlugin-hash-hash")
+        verify(contentHasher)
+            .hash(Parameter<String>.any)
+            .called(2)
+    }
+
     func test_hash_whenDependencyIsOptionalSDK_callsContentHasherAsExpected() async throws {
         // Given
         let dependency = TargetDependency.sdk(name: "foo", status: .optional)
