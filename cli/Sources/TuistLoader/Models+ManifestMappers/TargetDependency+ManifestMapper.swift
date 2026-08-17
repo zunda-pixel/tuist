@@ -80,15 +80,41 @@ extension XcodeGraph.TargetDependency {
         case let .package(product, type, package, condition):
             switch type {
             case .macro:
-                return [.package(product: product, type: .macro, package: package, condition: condition?.asGraphCondition)]
+                return [
+                    .package(
+                        product: product,
+                        type: .macro,
+                        package: package,
+                        condition: condition?.asGraphCondition
+                    ),
+                ]
             case .runtime:
-                return [.package(product: product, type: .runtime, package: package, condition: condition?.asGraphCondition)]
+                return [
+                    .package(
+                        product: product,
+                        type: .runtime,
+                        package: package,
+                        condition: condition?.asGraphCondition
+                    ),
+                ]
             case .runtimeEmbedded:
                 return [
-                    .package(product: product, type: .runtimeEmbedded, package: package, condition: condition?.asGraphCondition),
+                    .package(
+                        product: product,
+                        type: .runtimeEmbedded,
+                        package: package,
+                        condition: condition?.asGraphCondition
+                    ),
                 ]
             case .plugin:
-                return [.package(product: product, type: .plugin, package: package, condition: condition?.asGraphCondition)]
+                return [
+                    .package(
+                        product: product,
+                        type: .plugin,
+                        package: package,
+                        condition: condition?.asGraphCondition
+                    ),
+                ]
             }
         case let .sdk(name, type, status, condition):
             return [

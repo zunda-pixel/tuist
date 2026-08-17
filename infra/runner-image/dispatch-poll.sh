@@ -176,10 +176,24 @@ CACHE_INVENTORY_BEFORE=""
 # publish (which runs after detach, when nothing can be read) can still use it.
 CACHE_INVENTORY_AFTER=""
 STATUS_SHARE="/Volumes/My Shared Files/status"
-# Presigned PUT URL for this account's master archive (from the dispatch
-# response); the HEAD report endpoint is the dispatch URL's sibling.
-VOLUME_HEAD_UPLOAD=""
+# The Xcode compilation cache (CAS) is FOLDED into the cache image: a top-level
+# store dir beside `tuist/` inside the one mounted image. It works because it
+# lives on the attached block-device APFS image, not the virtio-fs share (llcas
+# mmaps its store and mmap over virtio-fs SIGBUSes). No separate image or mount —
+# the guest just points the compiler at <CACHE_MOUNT>/<CAS_STORE_DIR> when the
+# host stages the cas-enabled marker. The xcconfig lives on the VM's own disk
+# (xcodebuild only reads it).
+CAS_STORE_DIR="CompilationCache.noindex"
+CAS_XCCONFIG="/Users/runner/.tuist-cas.xcconfig"
+CAS_ENABLED_MARKER="cas-enabled"
+# Control-plane endpoints (dispatch URL's siblings/child). Neither receives the
+# image bytes: the mint endpoint returns a presigned object-storage PUT URL, and
+# the image is uploaded DIRECTLY to that URL (see report_volume_head). The
+# presigned URL is no longer handed out at dispatch — the guest mints it at
+# promote time keyed by its own new inventory digest, which keeps master object
+# keys immutable.
 VOLUME_HEAD_REPORT_URL="${TUIST_RUNNER_DISPATCH_URL%/dispatch}/volume-head"
+VOLUME_HEAD_UPLOAD_URL_MINT_ENDPOINT="${VOLUME_HEAD_REPORT_URL}/upload-url"
 
 # cache_inventory hashes the SORTED ENTRY NAMES (not mtimes) under the cache
 # subtrees whose churn means the job actually changed the cache: binaries
@@ -190,11 +204,25 @@ VOLUME_HEAD_REPORT_URL="${TUIST_RUNNER_DISPATCH_URL%/dispatch}/volume-head"
 cache_inventory() {
   [ -n "${CACHE_MOUNT}" ] || { echo "none"; return 0; }
   local root="${CACHE_MOUNT}/tuist"
+  local cas="${CACHE_MOUNT}/${CAS_STORE_DIR}"
+  # One `~cas/<relpath>\t<size>` line per regular file in the folded CAS store — a
+  # content identity, not a size proxy. It catches growth (llcas appends to fixed
+  # files, so a compile-only job that only grew the CAS still flips the digest and
+  # promotes) AND stays collision-safe: this digest is also the immutable object
+  # KEY a promote uploads under, so two branches with different contents must never
+  # produce the same digest. MUST match the host's inventoryDigest/casInventoryLines
+  # EXACTLY: regular files, dot-paths excluded (`-not -path '*/.*'` ⇔ the host's
+  # SkipDir), relpath, a TAB, logical st_size (stat -f %z).
+  # LC_ALL=C: byte-order sort, so this agrees with the host's inventoryDigest
+  # (Go sort.Strings is byte-wise). The `~cas/` lines sort LAST (0x7E > the
+  # alphanumeric subdir names), matching the host's casLinePrefix placement.
   {
     for d in Binaries Manifests ProjectDescriptionHelpers Plugins; do
       /bin/ls -1 "${root}/${d}" 2>/dev/null | sed "s|^|${d}/|"
     done
-  } | sort | shasum | awk '{print $1}'
+    ( cd "${cas}" 2>/dev/null && find . -type f -not -path '*/.*' -exec stat -f "%N$(printf '\t')%z" {} + 2>/dev/null ) \
+      | sed 's|^\./|~cas/|'
+  } | LC_ALL=C sort | shasum | awk '{print $1}'
 }
 
 # use_local_cold_cache points the CLI at a private, local cache dir and
@@ -268,6 +296,8 @@ attach_cache_image() {
     export TUIST_CACHE_MAX_BYTES="${budget}"
   fi
   echo "$(date -u +%FT%TZ) dispatch-poll: cache image mounted at ${CACHE_MOUNT}; TUIST_XDG_CACHE_HOME set (budget=${TUIST_CACHE_MAX_BYTES:-none})"
+  # The CAS store is folded into this image; point the compiler at it (if enabled).
+  setup_cas_store
   return 0
 }
 
@@ -344,6 +374,96 @@ probe_cache_share() {
   echo "$(date -u +%FT%TZ) dispatch-poll: cache share present at ${CACHE_SHARE}; image attaches after dispatch"
 }
 
+
+# setup_cas_store points every xcodebuild in the job at the folded CAS store
+# inside the mounted cache image, when the host staged the cas-enabled marker.
+# Called after attach_cache_image (CACHE_MOUNT set); the store rides the one
+# image, so there is nothing to attach and nothing to detach separately — the
+# cache image's own quiesced detach + not-promotable-on-failed-detach gate cover
+# it. Absent marker / unwritable store => the compilation cache falls to the
+# VM-local default (cold, dies with the VM). Never blocks the job.
+#
+# The CAS location rides XCODE_XCCONFIG_FILE, not a build setting Tuist writes
+# into a project: the common case is a plain `xcodebuild build` against a project
+# Tuist never generated and never wraps, which a project mapper (generate-only)
+# and `tuist xcodebuild` (wrapper-only) both miss. An xcconfig injected through
+# the environment is the one layer every xcodebuild invocation honors. (Measured
+# on staging: COMPILATION_CACHE_* as plain env vars does NOTHING; via
+# XCODE_XCCONFIG_FILE a raw build caches and replays warm.) It deliberately does
+# NOT set COMPILATION_CACHE_ENABLE_CACHING — enabling the cache stays the
+# project's opt-in; this only says WHERE an already-caching build keeps its store.
+#
+# PRECEDENCE, measured — XCODE_XCCONFIG_FILE OVERRIDES project/target settings
+# (swift-build's `environmentConfigPath`), so this FORCES the CAS location; the
+# escape hatch is a workflow's OWN xcconfig, `#include`d LAST below, so anything
+# it sets (the CAS path included) wins over these defaults.
+setup_cas_store() {
+  [ -n "${CACHE_MOUNT}" ] || return 0
+  # The marker carries the CAS's coordinated byte budget (empty/absent = the host
+  # disabled the feature). Reclaim of a stale store left by a previously enabled
+  # run happens at teardown, not here — see reclaim_cas_if_disabled.
+  local cas_limit_bytes
+  cas_limit_bytes=$(cat "${STATUS_SHARE}/${CAS_ENABLED_MARKER}" 2>/dev/null)
+  if [ -z "${cas_limit_bytes}" ]; then
+    echo "$(date -u +%FT%TZ) dispatch-poll: CAS not enabled; compilation cache runs VM-local"
+    return 0
+  fi
+  # A non-numeric budget is a staging bug; without a trustworthy bound we would
+  # point the compiler at the shared image with an UNBOUNDED store that could
+  # prune the binary cache to ENOSPC, so fall back to VM-local rather than guess.
+  case "${cas_limit_bytes}" in ''|*[!0-9]*)
+    echo "$(date -u +%FT%TZ) dispatch-poll: WARNING CAS budget marker not numeric (${cas_limit_bytes}); compilation cache runs VM-local"
+    return 0 ;;
+  esac
+  local store="${CACHE_MOUNT}/${CAS_STORE_DIR}"
+  mkdir -p "${store}" 2>/dev/null || true
+  # Never export a store the build can't write. `mkdir -p` says nothing about an
+  # ALREADY-EXISTING dir, so prove writability rather than assume it.
+  if ! touch "${store}/.writable" 2>/dev/null; then
+    echo "$(date -u +%FT%TZ) dispatch-poll: WARNING CAS store not writable; compilation cache runs VM-local"
+    return 0
+  fi
+  rm -f "${store}/.writable" 2>/dev/null || true
+  {
+    printf 'COMPILATION_CACHE_CAS_PATH = %s\n' "${store}"
+    printf 'COMPILATION_CACHE_KEEP_CAS_DIRECTORY = YES\n'
+    # Bound the store to the host-computed byte budget so llcas prunes before the
+    # image can hit ENOSPC. LIMIT_SIZE (not LIMIT_PERCENT): Swift Build's percent
+    # is against the current cache-db size plus free space, so as the binary cache
+    # fills the shared image the percent's denominator shrinks and the CAS prunes
+    # toward far less than intended. An absolute byte budget is invariant to the
+    # binary cache's fill; it is the coordinated other half of TUIST_CACHE_MAX_BYTES
+    # (both from the host's cacheImageSplit) so the two pruners cannot over-commit
+    # the one shared image.
+    printf 'COMPILATION_CACHE_LIMIT_SIZE = %s\n' "${cas_limit_bytes}"
+    # A pre-existing user xcconfig is chained LAST: the variable is a single slot,
+    # so carry theirs rather than clobber it, and including it after our defaults
+    # means anything they set explicitly (the CAS path included) wins.
+    if [ -n "${XCODE_XCCONFIG_FILE:-}" ] && [ -f "${XCODE_XCCONFIG_FILE}" ]; then
+      printf '#include "%s"\n' "${XCODE_XCCONFIG_FILE}"
+    fi
+  } > "${CAS_XCCONFIG}"
+  export XCODE_XCCONFIG_FILE="${CAS_XCCONFIG}"
+  echo "$(date -u +%FT%TZ) dispatch-poll: CAS store at ${store}; XCODE_XCCONFIG_FILE -> ${CAS_XCCONFIG}"
+}
+
+# reclaim_cas_if_disabled removes a leftover CAS store from the image when the
+# feature is OFF (no marker), so masters that were promoted while it was on stop
+# cloning and uploading dead CAS bytes (which also eat binary-cache capacity).
+# Runs at TEARDOWN, after the pre-job inventory was snapshotted WITH the store
+# present, so the removal registers as an inventory change (the store's ~cas/
+# lines drop out) → dirty → the cleaned image promotes and other hosts converge
+# to it. A no-op when
+# the feature is on or no store is present. Best-effort; never blocks teardown.
+reclaim_cas_if_disabled() {
+  [ -n "${CACHE_MOUNT}" ] || return 0
+  [ -f "${STATUS_SHARE}/${CAS_ENABLED_MARKER}" ] && return 0
+  local store="${CACHE_MOUNT}/${CAS_STORE_DIR}"
+  [ -d "${store}" ] || return 0
+  rm -rf "${store}" 2>/dev/null || true
+  echo "$(date -u +%FT%TZ) dispatch-poll: CAS disabled; reclaimed stale store from image"
+}
+
 # CACHE_READY_TIMEOUT bounds the wait for the host's cache-ready signal — the
 # most a job's start can be delayed by the cache. The host materializes from its
 # LOCAL master (a CoW clonefile, ~tens of ms, no network) before signalling;
@@ -389,20 +509,23 @@ wait_for_cache_ready() {
 }
 
 # capture_cache_state snapshots the post-job inventory while the image is still
-# MOUNTED — after the detach nothing inside it is readable. It records the
-# inventory digest (which the host records beside a promoted master; the host
-# cannot compute it itself without attaching) and remembers the inventory in
-# CACHE_INVENTORY_AFTER for report_cache_dirty.
-#
-# It writes NO promotion authorization: cache-digest is only ever read by the
-# host WHEN it promotes, so staging it before the detach is harmless. The marker
-# that actually authorizes promotion (cache-dirty) is deliberately withheld until
-# report_cache_dirty runs post-detach.
+# MOUNTED — after the detach nothing inside it is readable — into
+# CACHE_INVENTORY_AFTER, used by report_cache_dirty (to detect a change) and by
+# report_volume_head (as the new HEAD's tree_digest). The host tracks a promoted
+# master by its GENERATION, not this digest, so nothing is staged to the share
+# here; the digest travels to the server in the HEAD report instead.
 capture_cache_state() {
   [ -n "${CACHE_MOUNT}" ] || return 0
   [ -d "${STATUS_SHARE}" ] || return 0
   CACHE_INVENTORY_AFTER=$(cache_inventory)
-  printf '%s' "${CACHE_INVENTORY_AFTER}" > "${STATUS_SHARE}/cache-digest" 2>/dev/null || true
+  # Sample the image's post-job fill % (binary cache + CAS + overhead) while it's
+  # still mounted, for the host's fill histogram — the signal for whether the
+  # reserve is holding or the volume is running near ENOSPC. `df -P` for the
+  # portable one-line format; column 5 is Use%.
+  local fill
+  fill=$(df -P "${CACHE_MOUNT}" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5}')
+  case "${fill}" in ''|*[!0-9]*) fill="" ;; esac
+  [ -n "${fill}" ] && printf '%s' "${fill}" > "${STATUS_SHARE}/cache-fill-percent" 2>/dev/null || true
 }
 
 # report_cache_dirty writes the guest's dirty marker into the writable status
@@ -429,6 +552,7 @@ capture_cache_state() {
 # still promotes, which is acceptable — those artifacts are content-addressed
 # and signature-validated, so they warm rather than corrupt.) Mirrors the rc
 # gate in report_volume_head so local promote and HEAD publish agree.
+
 report_cache_dirty() {
   [ -d "${STATUS_SHARE}" ] || return 0
   local rc="${1:-1}" dirty=0
@@ -450,10 +574,35 @@ stage_volume_head() {
   gen=$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' /tmp/dispatch.json)
   digest=$(sed -n 's/.*"digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/dispatch.json)
   download=$(sed -n 's/.*"download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/dispatch.json)
-  VOLUME_HEAD_UPLOAD=$(sed -n 's/.*"upload_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/dispatch.json)
   [ -n "${download}" ] || return 0
   printf '{"generation":%s,"digest":"%s","download_url":"%s"}' \
     "${gen:-0}" "${digest}" "${download}" >"${STATUS_SHARE}/volume-head.json" 2>/dev/null || true
+}
+
+# read_base_generation returns the HEAD generation this VM's branch was cloned
+# from — staged by the host into the status share at materialize. It is the
+# fast-forward base the server checks the promote against: the server advances the
+# HEAD only if it is still at this generation. Absent or non-numeric (a cold
+# branch with no local master, or a host that did not stage it) reads as 0, which
+# the server accepts only when the account has no HEAD yet.
+read_base_generation() {
+  local gen=""
+  if [ -r "${STATUS_SHARE}/cache-base-generation" ]; then
+    gen=$(tr -cd '0-9' < "${STATUS_SHARE}/cache-base-generation" 2>/dev/null)
+  fi
+  printf '%s' "${gen:-0}"
+}
+
+# write_promote_result relays the promote outcome to the host so it can tell a
+# genuine fast-forward REJECTION (409 — a stale base another host advanced past,
+# real cross-host contention) apart from an upload/network/control-plane FAILURE.
+# Conflating the two would make a storage outage look like cache races on the
+# dashboard. The host reads this to pick the metric bucket and, on "accepted",
+# the generation to install the branch at. Values: "accepted <gen>", "conflict",
+# or "error".
+write_promote_result() {
+  [ -d "${STATUS_SHARE}" ] || return 0
+  printf '%s' "$1" > "${STATUS_SHARE}/cache-promote-result" 2>/dev/null || true
 }
 
 # VOLUME_HEAD_UPLOAD_TIMEOUT bounds the master upload. The image is sparse, so
@@ -464,8 +613,19 @@ stage_volume_head() {
 VOLUME_HEAD_UPLOAD_TIMEOUT=600
 
 # report_volume_head publishes this job's warm set as the account's new HEAD on a
-# successful, cache-changing job: it uploads the cache image to the presigned
-# master URL and bumps the account's HEAD to the new inventory digest.
+# successful, cache-changing job, in three steps:
+#   1. mint a presigned PUT URL keyed by THIS job's inventory digest, sending the
+#      base generation so the server can pre-empt a promote that cannot win,
+#   2. PUT the settled image to it,
+#   3. bump the account's HEAD to that digest.
+#
+# The digest-keyed object is content-addressed and immutable: a concurrent
+# promote of a DIFFERENT digest writes a DIFFERENT object, so it never clobbers
+# the object the current HEAD points at — the bug that let a behind host download
+# a master whose inventory no longer matched the HEAD digest and abandon
+# convergence, stranding the warm set on the one host that promoted it. HEAD is
+# bumped only AFTER the PUT succeeds, so a converging host that reads the new HEAD
+# always finds the object.
 #
 # The image is uploaded AS-IS, with no archiving step: it already carries the
 # symlinks, xattrs and modes the cache needs, which is the whole reason the cache
@@ -475,27 +635,112 @@ VOLUME_HEAD_UPLOAD_TIMEOUT=600
 report_volume_head() {
   local rc="${1:-1}"
   [ "${rc}" = "0" ] || return 0
-  [ -n "${CACHE_IMAGE_ACTIVE}" ] && [ -n "${VOLUME_HEAD_UPLOAD}" ] || return 0
+  [ -n "${CACHE_IMAGE_ACTIVE}" ] || return 0
   [ -n "${CACHE_INVENTORY_AFTER}" ] || return 0
   [ "${CACHE_INVENTORY_AFTER}" != "${CACHE_INVENTORY_BEFORE}" ] || return 0
+
+  local base_generation
+  base_generation=$(read_base_generation)
+
+  # Mint the content-addressed upload URL for this digest. The server binds it to
+  # the account this Pod ran (server-stamped label) and rejects a non-hex digest,
+  # so the guest cannot target another account or escape its prefix.
+  #
+  # The base generation rides along so the server can PRE-EMPT the upload: most
+  # promotes lose the fast-forward under cross-host contention, and paying for a
+  # multi-GB PUT first meant that loss still held the VM (and the host's slot)
+  # open for the whole transfer. A 409 here means the base has already been
+  # advanced past, so this promote is certain to be rejected and there is nothing
+  # to gain by uploading. It is only an optimization — the bump below stays the
+  # authority, and another host can still win in the window between the two — so
+  # every other outcome falls through to the upload-then-arbitrate path.
+  #
+  # Status captured explicitly instead of `curl -f` so the 409 is distinguishable
+  # from a transport failure, which must NOT be recorded as contention.
+  local mint_body mint_http upload_url
+  mint_body=$(mktemp 2>/dev/null || echo "/tmp/volhead-mint.$$")
+  mint_http=$(curl -sS --connect-timeout 10 --max-time 30 -X POST \
+    -H "Authorization: Bearer ${SA_TOKEN}" -H "Content-Type: application/json" \
+    --data "{\"tree_digest\":\"${CACHE_INVENTORY_AFTER}\",\"base_generation\":${base_generation}}" \
+    -o "${mint_body}" -w '%{http_code}' \
+    "${VOLUME_HEAD_UPLOAD_URL_MINT_ENDPOINT}" 2>/dev/null)
+  if [ "${mint_http}" = "409" ]; then
+    rm -f "${mint_body}" 2>/dev/null || true
+    write_promote_result "conflict"
+    echo "$(date -u +%FT%TZ) dispatch-poll: volume HEAD already advanced past base=${base_generation}; image not uploaded"
+    return 0
+  fi
+  upload_url=$(sed -n 's/.*"upload_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${mint_body}" 2>/dev/null)
+  rm -f "${mint_body}" 2>/dev/null || true
+  if [ -z "${upload_url}" ]; then
+    echo "$(date -u +%FT%TZ) dispatch-poll: no master upload URL (http=${mint_http:-000}); HEAD not advanced"
+    write_promote_result "error"
+    return 0
+  fi
+
   # This runs at teardown, after run.sh, before the EXIT trap halts the VM, so
-  # both requests MUST be bounded — an object-storage stall here would otherwise
+  # every request MUST be bounded — an object-storage stall here would otherwise
   # hang the script, keep the VM up, and stop the warm pool refilling. On any
   # timeout, HEAD just isn't advanced (best-effort) and teardown proceeds.
   #
   # No -L on the PUT: the presigned upload URL is written directly (no redirect),
   # so refuse to follow redirects — otherwise a compromised/misconfigured storage
   # endpoint could 307 the upload to an internal address and receive the image
-  # body (SSRF), the write-side twin of the download guard.
+  # body (SSRF), the write-side twin of the download guard. The server has
+  # already checked the URL host is public before handing it over.
+  # Time the PUT — the volume upload blocks teardown, so the VM cannot halt and
+  # the host cannot reclaim the slot until it finishes. Report the duration to the
+  # host (volume-upload-ms) so we can watch how long uploads hold slots and keep
+  # the volume sized so it stays fast. perl for ms precision (BSD date has no %N).
+  local upload_start upload_end
+  upload_start=$(perl -MTime::HiRes -e 'printf "%d", Time::HiRes::time()*1000' 2>/dev/null || echo 0)
   if ! curl -fsS --connect-timeout 10 --max-time "${VOLUME_HEAD_UPLOAD_TIMEOUT}" \
-    -X PUT --upload-file "${CACHE_IMAGE}" "${VOLUME_HEAD_UPLOAD}" >/dev/null 2>&1; then
+    -X PUT --upload-file "${CACHE_IMAGE}" "${upload_url}" >/dev/null 2>&1; then
     echo "$(date -u +%FT%TZ) dispatch-poll: master image upload failed/timed out; HEAD not advanced"
+    write_promote_result "error"
     return 0
   fi
-  curl -fsS --connect-timeout 10 --max-time 15 -X POST \
+  upload_end=$(perl -MTime::HiRes -e 'printf "%d", Time::HiRes::time()*1000' 2>/dev/null || echo 0)
+  if [ -d "${STATUS_SHARE}" ] && [ "${upload_end}" -gt "${upload_start}" ] 2>/dev/null; then
+    printf '%s' "$(( upload_end - upload_start ))" > "${STATUS_SHARE}/volume-upload-ms" 2>/dev/null || true
+  fi
+  # Only now advance the HEAD: the object at the digest key exists, so a
+  # converging host that reads this HEAD will find it.
+  #
+  # The bump is a fast-forward compare-and-swap keyed by the base generation this
+  # job's branch was cloned from (staged by the host at materialize). The server
+  # accepts only if the HEAD is still at that base and returns the accepted
+  # generation (200); a stale base is a 409. Capture the HTTP status explicitly —
+  # WITHOUT curl -f, which would collapse a 409 and a transport error into the
+  # same failure — so the host can distinguish a genuine fast-forward rejection
+  # (cross-host contention) from an upload/network/control-plane failure. On 200
+  # the host installs the branch as its local master at the accepted generation;
+  # on 409 or error it discards and re-converges. The mint above pre-empts the
+  # common stale-base case, but this is still where the outcome is decided: the
+  # HEAD can have moved during the upload that just ran.
+  local body http_code promoted_generation
+  body=$(mktemp 2>/dev/null || echo "/tmp/volhead-report.$$")
+  http_code=$(curl -sS --connect-timeout 10 --max-time 15 -X POST \
     -H "Authorization: Bearer ${SA_TOKEN}" -H "Content-Type: application/json" \
-    --data "{\"tree_digest\":\"${CACHE_INVENTORY_AFTER}\"}" "${VOLUME_HEAD_REPORT_URL}" >/dev/null 2>&1 || true
-  echo "$(date -u +%FT%TZ) dispatch-poll: published volume HEAD (digest=${CACHE_INVENTORY_AFTER})"
+    --data "{\"tree_digest\":\"${CACHE_INVENTORY_AFTER}\",\"base_generation\":${base_generation}}" \
+    -o "${body}" -w '%{http_code}' \
+    "${VOLUME_HEAD_REPORT_URL}" 2>/dev/null)
+  case "${http_code}" in
+    200)
+      promoted_generation=$(sed -n 's/.*"generation"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "${body}")
+      write_promote_result "accepted ${promoted_generation:-0}"
+      echo "$(date -u +%FT%TZ) dispatch-poll: published volume HEAD (digest=${CACHE_INVENTORY_AFTER} generation=${promoted_generation:-0})"
+      ;;
+    409)
+      write_promote_result "conflict"
+      echo "$(date -u +%FT%TZ) dispatch-poll: volume HEAD fast-forward rejected (stale base=${base_generation}); branch not promoted"
+      ;;
+    *)
+      write_promote_result "error"
+      echo "$(date -u +%FT%TZ) dispatch-poll: volume HEAD report failed/unreachable (http=${http_code:-000}); branch not promoted"
+      ;;
+  esac
+  rm -f "${body}" 2>/dev/null || true
 }
 
 # Probe before polling: the share is attached at boot, independent of which
@@ -678,6 +923,7 @@ HOOK
       fi
       wait "${runner_pid}"
       rc=$?
+      # The runner is gone, so the idle watchdog has nothing left to police.
       [ -n "${watchdog_pid:-}" ] && kill "${watchdog_pid}" 2>/dev/null || true
       # Cache teardown. The order here is load-bearing:
       #   1. capture the inventory + digest, which only works while the image is
@@ -690,6 +936,10 @@ HOOK
       #      upload the settled image as the account's new HEAD. A detach failure
       #      or an early exit leaves no dirty marker, so the host discards.
       # rc gates promotion — a failed run never advances the master.
+      # If the CAS feature was turned off, drop its stale store from the image
+      # BEFORE snapshotting the post-job inventory, so the removal promotes a
+      # cleaned master instead of masters carrying dead CAS bytes forever.
+      reclaim_cas_if_disabled
       capture_cache_state
       if detach_cache_image; then
         report_cache_dirty "${rc}"

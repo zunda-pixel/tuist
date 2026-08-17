@@ -327,7 +327,8 @@ struct ProjectDescriptorGenerator: ProjectDescriptorGenerating {
                 )
 
                 let packageReference = XCLocalSwiftPackageReference(
-                    relativePath: relativePath
+                    relativePath: relativePath,
+                    traits: project.packageTraits?[package.identity]
                 )
                 pbxproj.add(object: packageReference)
                 localPackageReferences[path.pathString] = packageReference
@@ -345,7 +346,8 @@ struct ProjectDescriptorGenerator: ProjectDescriptorGenerating {
                 Logger.current.debug("Processing remote package \(url) for project \(project.name)")
                 let packageReference = XCRemoteSwiftPackageReference(
                     repositoryURL: url,
-                    versionRequirement: requirement.xcodeprojValue
+                    versionRequirement: requirement.xcodeprojValue,
+                    traits: project.packageTraits?[package.identity]
                 )
                 remotePackageReferences[url] = packageReference
                 pbxproj.add(object: packageReference)
