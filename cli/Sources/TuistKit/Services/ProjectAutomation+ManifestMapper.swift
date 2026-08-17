@@ -137,7 +137,7 @@ extension ProjectAutomation.Target {
                 publicHeaders: publicHeaders.pathString,
                 swiftModuleMap: swiftModuleMap?.pathString
             )
-        case let .package(product, type, _):
+        case let .package(product, type, _, _):
             switch type {
             case .macro:
                 return .packageMacro(product: product)

@@ -178,9 +178,10 @@ struct LinkGenerator: LinkGenerating { // swiftlint:disable:this type_body_lengt
         path: AbsolutePath,
         graphTraverser: GraphTraversing
     ) throws {
+        let remotePackages = pbxproj.rootObject?.remotePackages ?? []
         for dependency in target.dependencies {
             switch dependency {
-            case let .package(product: product, type: type, condition: condition):
+            case let .package(product: product, type: type, package: package, condition: condition):
                 guard !target.canLinkStaticProducts() || type == .plugin || type == .macro else {
                     continue
                 }
@@ -196,6 +197,9 @@ struct LinkGenerator: LinkGenerating { // swiftlint:disable:this type_body_lengt
                 guard role != .buildOnly else { continue }
                 try pbxTarget.addSwiftPackageProduct(
                     productName: product,
+                    // Only plugins need their owning package linked; runtime products keep their existing
+                    // behavior (linked in the Frameworks phase and resolved by Xcode by product name).
+                    packageReference: role == .plugin ? remotePackageReference(named: package, in: remotePackages) : nil,
                     role: role,
                     pbxproj: pbxproj,
                     target: target,
@@ -229,6 +233,20 @@ struct LinkGenerator: LinkGenerating { // swiftlint:disable:this type_body_lengt
                 pbxTarget: pbxTarget
             )
         }
+    }
+
+    /// Resolves the remote package that vends a product dependency so its reference can be attached to
+    /// the generated `XCSwiftPackageProductDependency`. Xcode requires this link to resolve and run
+    /// build-tool `plugin` products. When the dependency doesn't name a package but the project declares
+    /// a single remote package, that package is used.
+    private func remotePackageReference(
+        named name: String?,
+        in remotePackages: [XCRemoteSwiftPackageReference]
+    ) -> XCRemoteSwiftPackageReference? {
+        if let name {
+            return remotePackages.first { $0.name == name || $0.repositoryURL == name }
+        }
+        return remotePackages.count == 1 ? remotePackages.first : nil
     }
 
     // swiftlint:disable:next function_body_length
@@ -711,12 +729,17 @@ extension PBXTarget {
 
     func addSwiftPackageProduct(
         productName: String,
+        packageReference: XCRemoteSwiftPackageReference? = nil,
         role: SwiftPackageProductRole,
         pbxproj: PBXProj,
         target: Target,
         condition: PlatformCondition?
     ) throws {
-        let productDependency = XCSwiftPackageProductDependency(productName: productName, isPlugin: role == .plugin)
+        let productDependency = XCSwiftPackageProductDependency(
+            productName: productName,
+            package: packageReference,
+            isPlugin: role == .plugin
+        )
         pbxproj.add(object: productDependency)
 
         switch role {
