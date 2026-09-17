@@ -245,7 +245,7 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
     public struct Target: Codable, Hashable { // swiftlint:disable:this type_body_length
         private enum CodingKeys: String, CodingKey {
             case name, path, url, sources, packageAccess, resources, exclude, dependencies, publicHeadersPath, type, settings,
-                 checksum
+                 checksum, pluginUsages
         }
 
         /// The name of the target.
@@ -284,6 +284,9 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
         /// If true, access to package declarations from other targets in the package is allowed.
         public let packageAccess: Bool
 
+        /// The build tool plugins applied to this target.
+        public let pluginUsages: [PluginUsage]
+
         public init(
             name: String,
             path: String?,
@@ -296,7 +299,8 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
             type: TargetType,
             settings: [TargetBuildSettingDescription.Setting],
             checksum: String?,
-            packageAccess: Bool = false
+            packageAccess: Bool = false,
+            pluginUsages: [PluginUsage] = []
         ) {
             self.name = name
             self.path = path
@@ -310,6 +314,7 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
             self.type = type
             self.settings = settings
             self.checksum = checksum
+            self.pluginUsages = pluginUsages
         }
 
         public init(from decoder: Decoder) throws {
@@ -326,6 +331,7 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
             type = try container.decode(TargetType.self, forKey: .type)
             settings = try container.decode([TargetBuildSettingDescription.Setting].self, forKey: .settings)
             checksum = try container.decodeIfPresent(String.self, forKey: .checksum)
+            pluginUsages = try container.decodeIfPresent([PluginUsage].self, forKey: .pluginUsages) ?? []
         }
 
         #if DEBUG
@@ -341,7 +347,8 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
                 type: TargetType = .regular,
                 settings: [TargetBuildSettingDescription.Setting] = [],
                 checksum: String? = nil,
-                packageAccess _: Bool = false
+                packageAccess _: Bool = false,
+                pluginUsages: [PluginUsage] = []
             ) -> Self {
                 Self(
                     name: name,
@@ -354,10 +361,56 @@ public struct PackageInfo: Equatable, Hashable, Codable { // swiftlint:disable:t
                     publicHeadersPath: publicHeadersPath,
                     type: type,
                     settings: settings,
-                    checksum: checksum
+                    checksum: checksum,
+                    pluginUsages: pluginUsages
                 )
             }
         #endif
+
+        // MARK: Target.PluginUsage
+
+        /// A build tool plugin applied to the target.
+        public enum PluginUsage: Hashable, Codable {
+            /// A plugin vended by `package`, or by the target's own package when `package` is `nil`.
+            case plugin(name: String, package: String?)
+
+            public var name: String {
+                switch self {
+                case let .plugin(name: name, package: _):
+                    return name
+                }
+            }
+
+            public var package: String? {
+                switch self {
+                case let .plugin(name: _, package: package):
+                    return package
+                }
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case plugin
+            }
+
+            public init(from decoder: Decoder) throws {
+                let values = try decoder.container(keyedBy: CodingKeys.self)
+                var unkeyedValues = try values.nestedUnkeyedContainer(forKey: .plugin)
+                self = .plugin(
+                    name: try unkeyedValues.decode(String.self),
+                    package: try unkeyedValues.decodeIfPresent(String.self)
+                )
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var container = encoder.container(keyedBy: CodingKeys.self)
+                switch self {
+                case let .plugin(name: name, package: package):
+                    var unkeyedContainer = container.nestedUnkeyedContainer(forKey: .plugin)
+                    try unkeyedContainer.encode(name)
+                    try unkeyedContainer.encode(package)
+                }
+            }
+        }
 
         // MARK: Target.Dependency
 

@@ -6387,6 +6387,129 @@ struct PackageInfoMapperTests {
     @Test(
         .inTemporaryDirectory,
         .withMockedSwiftVersionProvider
+    ) func map_whenTargetUsesBuildToolPluginFromAnotherPackage() async throws {
+        let basePath = try #require(FileSystem.temporaryTestDirectory)
+        let packagePath = basePath.appending(try RelativePath(validating: "Package"))
+        let pluginPackagePath = basePath.appending(try RelativePath(validating: "checkouts/SwiftLintPlugin"))
+        let sourcesPath = packagePath.appending(try RelativePath(validating: "Sources/Target1"))
+        try await fileSystem.makeDirectory(at: sourcesPath)
+        try await fileSystem.touch(sourcesPath.appending(component: "file.swift"))
+
+        let packageInfo = PackageInfo.test(
+            name: "Package",
+            products: [
+                .init(name: "Product1", type: .library(.automatic), targets: ["Target1"]),
+            ],
+            targets: [
+                .test(
+                    name: "Target1",
+                    pluginUsages: [.plugin(name: "SwiftLint", package: "SwiftLintPlugin")]
+                ),
+            ],
+            platforms: [.ios],
+            cLanguageStandard: nil,
+            cxxLanguageStandard: nil,
+            swiftLanguageVersions: nil
+        )
+
+        let project = try await subject.map(
+            packageInfo: packageInfo,
+            path: packagePath,
+            packageType: .local,
+            packageSettings: .test(),
+            packageModuleAliases: [:],
+            packageToFolder: ["swiftlintplugin": pluginPackagePath],
+            enabledTraits: []
+        )
+
+        // The plugin package is referenced by the project so that Xcode can build and run the plugin,
+        // and the target depends on the plugin product.
+        #expect(project?.packages == [.local(path: .path(pluginPackagePath.pathString))])
+        let target = try #require(project?.targets.first(where: { $0.name == "Target1" }))
+        #expect(target.dependencies.contains(.package(product: "SwiftLint", type: .plugin)))
+    }
+
+    @Test(
+        .inTemporaryDirectory,
+        .withMockedSwiftVersionProvider
+    ) func map_whenTargetUsesBuildToolPluginFromItsOwnPackage() async throws {
+        let basePath = try #require(FileSystem.temporaryTestDirectory)
+        let packagePath = basePath.appending(try RelativePath(validating: "Package"))
+        let sourcesPath = packagePath.appending(try RelativePath(validating: "Sources/Target1"))
+        try await fileSystem.makeDirectory(at: sourcesPath)
+        try await fileSystem.touch(sourcesPath.appending(component: "file.swift"))
+
+        let packageInfo = PackageInfo.test(
+            name: "Package",
+            products: [
+                .init(name: "Product1", type: .library(.automatic), targets: ["Target1"]),
+            ],
+            targets: [
+                .test(
+                    name: "Target1",
+                    pluginUsages: [.plugin(name: "InternalPlugin", package: nil)]
+                ),
+            ],
+            platforms: [.ios],
+            cLanguageStandard: nil,
+            cxxLanguageStandard: nil,
+            swiftLanguageVersions: nil
+        )
+
+        let project = try await subject.map(
+            packageInfo: packageInfo,
+            path: packagePath,
+            packageType: .local,
+            packageSettings: .test(),
+            packageModuleAliases: [:],
+            packageToFolder: [:],
+            enabledTraits: []
+        )
+
+        // A plugin without a package name is vended by the package being mapped.
+        #expect(project?.packages == [.local(path: .path(packagePath.pathString))])
+        let target = try #require(project?.targets.first(where: { $0.name == "Target1" }))
+        #expect(target.dependencies.contains(.package(product: "InternalPlugin", type: .plugin)))
+    }
+
+    @Test(
+        .inTemporaryDirectory,
+        .withMockedSwiftVersionProvider
+    ) func map_whenTargetUsesNoBuildToolPlugin_addsNoPackages() async throws {
+        let basePath = try #require(FileSystem.temporaryTestDirectory)
+        let packagePath = basePath.appending(try RelativePath(validating: "Package"))
+        let sourcesPath = packagePath.appending(try RelativePath(validating: "Sources/Target1"))
+        try await fileSystem.makeDirectory(at: sourcesPath)
+        try await fileSystem.touch(sourcesPath.appending(component: "file.swift"))
+
+        let packageInfo = PackageInfo.test(
+            name: "Package",
+            products: [
+                .init(name: "Product1", type: .library(.automatic), targets: ["Target1"]),
+            ],
+            targets: [.test(name: "Target1")],
+            platforms: [.ios],
+            cLanguageStandard: nil,
+            cxxLanguageStandard: nil,
+            swiftLanguageVersions: nil
+        )
+
+        let project = try await subject.map(
+            packageInfo: packageInfo,
+            path: packagePath,
+            packageType: .local,
+            packageSettings: .test(),
+            packageModuleAliases: [:],
+            packageToFolder: [:],
+            enabledTraits: []
+        )
+
+        #expect(project?.packages == [])
+    }
+
+    @Test(
+        .inTemporaryDirectory,
+        .withMockedSwiftVersionProvider
     ) func map_whenSourcesDirectlyInSourcesDirectory_SE0162Support() async throws {
         let basePath = try #require(FileSystem.temporaryTestDirectory)
         let packagePath = basePath.appending(try RelativePath(validating: "Package"))
@@ -6422,6 +6545,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -6467,6 +6591,7 @@ struct PackageInfoMapperTests {
                 packageType: .local,
                 packageSettings: .test(),
                 packageModuleAliases: [:],
+                packageToFolder: [:],
                 enabledTraits: []
             )
         }
@@ -6507,6 +6632,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -6552,6 +6678,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -6602,6 +6729,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -6651,6 +6779,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -6926,6 +7055,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: Set(["FeatureX", "FeatureY"])
         )
 
@@ -6969,6 +7099,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: Set(["default"])
         )
 
@@ -7110,6 +7241,7 @@ struct PackageInfoMapperTests {
             packageType: .local,
             packageSettings: .test(),
             packageModuleAliases: [:],
+            packageToFolder: [:],
             enabledTraits: []
         )
 
@@ -8736,6 +8868,7 @@ extension PackageInfoMapping {
             baseSettings: .default
         ),
         packageModuleAliases: [String: [String: String]] = [:],
+        packageToFolder: [String: AbsolutePath] = [:],
         enabledTraits: Set<String> = []
     ) async throws -> ProjectDescription.Project? {
         let packageToTargetsToArtifactPaths: [String: [String: AbsolutePath]] = try packageInfos
@@ -8764,6 +8897,7 @@ extension PackageInfoMapping {
             packageType: packageType ?? .external(artifactPaths: packageToTargetsToArtifactPaths[package]!),
             packageSettings: packageSettings,
             packageModuleAliases: packageModuleAliases,
+            packageToFolder: packageToFolder,
             enabledTraits: enabledTraits
         )
     }
@@ -8780,7 +8914,8 @@ extension PackageInfo.Target {
         exclude: [String] = [],
         dependencies: [PackageInfo.Target.Dependency] = [],
         publicHeadersPath: String? = nil,
-        settings: [TargetBuildSettingDescription.Setting] = []
+        settings: [TargetBuildSettingDescription.Setting] = [],
+        pluginUsages: [PackageInfo.Target.PluginUsage] = []
     ) -> Self {
         .init(
             name: name,
@@ -8793,7 +8928,8 @@ extension PackageInfo.Target {
             publicHeadersPath: publicHeadersPath,
             type: type,
             settings: settings,
-            checksum: nil
+            checksum: nil,
+            pluginUsages: pluginUsages
         )
     }
 }
