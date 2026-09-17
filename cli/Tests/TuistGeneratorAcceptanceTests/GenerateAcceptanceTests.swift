@@ -1725,6 +1725,15 @@ struct GenerateAcceptanceTestFrameworkWithMacroAndPluginPackages {
     }
 }
 
+struct GenerateAcceptanceTestAppWithSPMBuildToolPlugin {
+    @Test(.withFixture("generated_app_with_spm_build_tool_plugin"), .inTemporaryDirectory)
+    func app_with_spm_build_tool_plugin() async throws {
+        try await run(InstallCommand.self)
+        try await run(GenerateCommand.self)
+        try await run(BuildCommand.self, "--", "-skipPackagePluginValidation")
+    }
+}
+
 struct GenerateAcceptanceTestAppWithRevenueCat {
     @Test(.disabled(), .withFixture("generated_app_with_revenue_cat"), .inTemporaryDirectory)
     func app_with_revenue_cat() async throws {

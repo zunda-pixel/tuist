@@ -81,6 +81,7 @@ private final class PackageInfoMapperPrebuiltSpy: PackageInfoMapping, @unchecked
         packageType: PackageType,
         packageSettings _: TuistCore.PackageSettings,
         packageModuleAliases _: [String: [String: String]],
+        packageToFolder _: [String: Path.AbsolutePath],
         enabledTraits _: Set<String>
     ) async throws -> ProjectDescription.Project? {
         let capturedPrebuilt: CapturedPackagePrebuilt?
@@ -140,6 +141,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                 packageType: .any,
                 packageSettings: .any,
                 packageModuleAliases: .any,
+                packageToFolder: .any,
                 enabledTraits: .any
             )
             .willReturn(.test())
@@ -511,6 +513,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                 packageType: .any,
                 packageSettings: .any,
                 packageModuleAliases: .any,
+                packageToFolder: .any,
                 enabledTraits: .any
             )
             .called(1)
@@ -567,6 +570,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                 packageType: .any,
                 packageSettings: .any,
                 packageModuleAliases: .any,
+                packageToFolder: .any,
                 enabledTraits: .any
             )
             .called(1)
@@ -742,6 +746,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                         },
                         packageSettings: .any,
                         packageModuleAliases: .any,
+                        packageToFolder: .any,
                         enabledTraits: .any
                     )
                     .called(1)
@@ -1124,6 +1129,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                 },
                 packageSettings: .any,
                 packageModuleAliases: .any,
+                packageToFolder: .any,
                 enabledTraits: .any
             )
             .called(1)
@@ -1255,6 +1261,7 @@ struct SwiftPackageManagerGraphLoaderTests {
                 },
                 packageSettings: .any,
                 packageModuleAliases: .any,
+                packageToFolder: .any,
                 enabledTraits: .any
             )
             .called(1)

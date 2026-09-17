@@ -164,6 +164,7 @@ public protocol PackageInfoMapping {
         packageType: PackageType,
         packageSettings: TuistCore.PackageSettings,
         packageModuleAliases: [String: [String: String]],
+        packageToFolder: [String: AbsolutePath],
         enabledTraits: Set<String>
     ) async throws -> ProjectDescription.Project?
 }
@@ -368,6 +369,7 @@ public struct PackageInfoMapper: PackageInfoMapping {
         packageType: PackageType,
         packageSettings: TuistCore.PackageSettings,
         packageModuleAliases: [String: [String: String]],
+        packageToFolder: [String: AbsolutePath],
         enabledTraits: Set<String>
     ) async throws -> ProjectDescription.Project? {
         // Hardcoded mapping for some well known libraries, until the logic can handle those properly
@@ -458,6 +460,11 @@ public struct PackageInfoMapper: PackageInfoMapping {
         return ProjectDescription.Project(
             name: packageInfo.name,
             options: options,
+            packages: pluginPackages(
+                packageInfo: packageInfo,
+                path: path,
+                packageToFolder: packageToFolder
+            ),
             settings: packageInfo.projectSettings(
                 packageFolder: path,
                 baseSettings: packageSettings.baseSettings,
@@ -466,6 +473,44 @@ public struct PackageInfoMapper: PackageInfoMapping {
             targets: targets,
             resourceSynthesizers: .default
         )
+    }
+
+    /// Xcode only runs a build tool plugin when the project references the package that vends it. The
+    /// packages are checked out by SwiftPM already, so they are referenced as local packages rather than
+    /// re-resolved as remote ones.
+    private func pluginPackages(
+        packageInfo: PackageInfo,
+        path: AbsolutePath,
+        packageToFolder: [String: AbsolutePath]
+    ) -> [ProjectDescription.Package] {
+        let pluginUsages = packageInfo.targets.flatMap(\.pluginUsages)
+        guard !pluginUsages.isEmpty else { return [] }
+
+        let folders = pluginUsages.reduce(into: [AbsolutePath]()) { result, pluginUsage in
+            guard let folder = pluginPackageFolder(
+                named: pluginUsage.package,
+                path: path,
+                packageToFolder: packageToFolder
+            ), !result.contains(folder) else { return }
+            result.append(folder)
+        }
+
+        return folders.map { .local(path: .path($0.pathString)) }
+    }
+
+    /// Resolves the folder of the package vending a plugin. SwiftPM lets `.plugin(name:package:)` name a
+    /// package either by its identity or by the name of its folder, so both are matched, case-insensitively
+    /// as SwiftPM identities are lowercased. A `nil` name means the plugin lives in the package itself.
+    private func pluginPackageFolder(
+        named name: String?,
+        path: AbsolutePath,
+        packageToFolder: [String: AbsolutePath]
+    ) -> AbsolutePath? {
+        guard let name else { return path }
+        if let folder = packageToFolder[name] ?? packageToFolder[name.lowercased()] {
+            return folder
+        }
+        return packageToFolder.values.first { $0.basename.lowercased() == name.lowercased() }
     }
 
     fileprivate static func sanitize(targetName: String) -> String {
@@ -978,6 +1023,13 @@ public struct PackageInfoMapper: PackageInfoMapping {
                 }
             }
             dependencies = linkerDependencies + dependencies
+
+            // Build tool plugins are declared through `plugins:` on the SwiftPM target rather than through
+            // `dependencies:`. Xcode runs them when the generated target depends on the plugin product and
+            // the vending package is referenced by the project, which `map(packageInfo:)` adds.
+            dependencies += target.pluginUsages.map { pluginUsage in
+                .package(product: pluginUsage.name, type: .plugin)
+            }
         }
 
         let targetName = packageModuleAliases[packageInfo.name]?[target.name] ?? target.name

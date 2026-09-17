@@ -176,6 +176,9 @@ public struct RecursiveManifestLoader: RecursiveManifestLoading {
                     packageType: .local,
                     packageSettings: packageSettings,
                     packageModuleAliases: [:],
+                    // Local packages are loaded one at a time, so only plugins vended by the package
+                    // itself can be resolved here.
+                    packageToFolder: [:],
                     enabledTraits: []
                 )
             }

@@ -138,4 +138,81 @@ struct PackageInfoTests {
             .init(tool: .c, name: .enableWarning, condition: nil, value: ["all"]),
         ])
     }
+
+    @Test
+    func packageInfo_decodesPluginUsages() throws {
+        // Given: the shape `swift package dump-package` emits for
+        // `plugins: ["InternalPlugin", .plugin(name: "SwiftLint", package: "SwiftLintPlugin")]`.
+        let json = """
+        {
+          "name": "Package",
+          "products": [],
+          "targets": [
+            {
+              "name": "Target",
+              "type": "regular",
+              "resources": [],
+              "exclude": [],
+              "dependencies": [],
+              "settings": [],
+              "pluginUsages": [
+                { "plugin": ["InternalPlugin", null] },
+                { "plugin": ["SwiftLint", "SwiftLintPlugin"] }
+              ]
+            }
+          ],
+          "traits": [],
+          "dependencies": [],
+          "platforms": [],
+          "toolsVersion": {
+            "_version": "5.9.0"
+          }
+        }
+        """
+        let data = try #require(json.data(using: .utf8))
+
+        // When
+        let decoded = try JSONDecoder().decode(PackageInfo.self, from: data)
+
+        // Then
+        #expect(decoded.targets.first?.pluginUsages == [
+            .plugin(name: "InternalPlugin", package: nil),
+            .plugin(name: "SwiftLint", package: "SwiftLintPlugin"),
+        ])
+    }
+
+    @Test
+    func packageInfo_decodesMissingPluginUsagesAsEmpty() throws {
+        // Given
+        let json = """
+        {
+          "name": "Package",
+          "products": [],
+          "targets": [
+            {
+              "name": "Target",
+              "type": "regular",
+              "resources": [],
+              "exclude": [],
+              "dependencies": [],
+              "settings": [],
+              "pluginUsages": null
+            }
+          ],
+          "traits": [],
+          "dependencies": [],
+          "platforms": [],
+          "toolsVersion": {
+            "_version": "5.9.0"
+          }
+        }
+        """
+        let data = try #require(json.data(using: .utf8))
+
+        // When
+        let decoded = try JSONDecoder().decode(PackageInfo.self, from: data)
+
+        // Then
+        #expect(decoded.targets.first?.pluginUsages == [])
+    }
 }
